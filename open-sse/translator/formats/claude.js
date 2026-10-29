@@ -8,6 +8,7 @@ import { isValidClaudeSignature } from "../../utils/claudeSignature.js";
 import { PROVIDERS } from "../../providers/index.js";
 import { getCapabilitiesForModel } from "../../providers/capabilities.js";
 import { isDeepSeekModel } from "../../providers/models/helpers.js";
+import { isOfficialAnthropicEndpoint } from "../../providers/shared.js";
 import { DEFAULT_MAX_TOKENS } from "../../config/runtimeConfig.js";
 
 const CACHE_CONTROL_5M = { type: "ephemeral" };
@@ -218,7 +219,7 @@ function hasForeignServerToolUseId(block) {
 // 3. bare content-block objects (content: {block} instead of [{block}]) → wrapped first
 // 4. role "system" messages (mid-conversation-system beta) → only top-level system is allowed
 // 5. server_tool_use blocks carrying a foreign (non-srvtoolu_) id → rejected outright
-export function normalizeClaudePassthrough(body, model = "") {
+export function normalizeClaudePassthrough(body, model = "", preserveSignedHistory = false) {
   if (!body || typeof body !== "object") return body;
 
   // 1. Downgrade adaptive thinking for models that don't support it
@@ -288,7 +289,7 @@ export function normalizeClaudePassthrough(body, model = "") {
       const kept = [];
       for (const block of msg.content) {
         if (block.type === CLAUDE_BLOCK.THINKING || block.type === CLAUDE_BLOCK.REDACTED_THINKING) {
-          if (isValidClaudeSignature(block.signature)) {
+          if (preserveSignedHistory || isValidClaudeSignature(block.signature)) {
             hasKeptThinking = true;
             kept.push(block);
           }
@@ -302,7 +303,7 @@ export function normalizeClaudePassthrough(body, model = "") {
         kept.push(block);
       }
       msg.content = kept;
-      if (thinkingEnabled && !hasKeptThinking && hasToolUse) {
+      if (!preserveSignedHistory && thinkingEnabled && !hasKeptThinking && hasToolUse) {
         msg.content.unshift(buildThinkingPlaceholder("claude"));
       }
     }
@@ -336,7 +337,7 @@ export function normalizeClaudePassthrough(body, model = "") {
       if (!Array.isArray(msg.content)) return true;
       msg.content = msg.content.filter(block =>
         !(block?.type === CLAUDE_BLOCK.TEXT && !String(block.text ?? "").trim())
-        && !(block?.type === CLAUDE_BLOCK.THINKING && !String(block.thinking ?? "").trim()));
+        && !(!preserveSignedHistory && block?.type === CLAUDE_BLOCK.THINKING && !String(block.thinking ?? "").trim()));
       return msg.content.length > 0;
     });
     body.messages = ensureTrailingUserTurn(body.messages, originalLastRole);
@@ -492,7 +493,8 @@ export function hoistToolResultImages(body) {
   return touched ? { ...body, messages } : body;
 }
 
-export function prepareClaudeRequest(body, provider = null, apiKey = null, connectionId = null, rawHeaders = null, sessionId = null) {
+export function prepareClaudeRequest(body, provider = null, apiKey = null, connectionId = null, rawHeaders = null, sessionId = null, credentials = null) {
+  const officialAnthropic = isOfficialAnthropicEndpoint(provider, credentials?.runtimeTransport?.baseUrl || credentials?.providerSpecificData?.baseUrl);
   // quirk: MiniMax's Claude-compatible endpoint rejects Anthropic's output_config (400 invalid params)
   if (PROVIDERS[provider]?.quirks?.dropOutputConfig) {
     delete body.output_config;
@@ -503,7 +505,7 @@ export function prepareClaudeRequest(body, provider = null, apiKey = null, conne
   // answer 400 "context_management: Extra inputs are not permitted". Same-format
   // claude→claude requests skip body rebuilding in the translator, so the field
   // rides through to every non-Anthropic provider on the Claude transport.
-  const isAnthropicServing = provider === "claude" || provider?.startsWith?.("anthropic-compatible-");
+  const isAnthropicServing = provider === "anthropic" || provider === "claude" || provider?.startsWith?.("anthropic-compatible-");
   if (!isAnthropicServing) {
     delete body.context_management;
   }
@@ -622,12 +624,12 @@ export function prepareClaudeRequest(body, provider = null, apiKey = null, conne
         }
 
         // Handle thinking blocks for Anthropic-compatible endpoints.
-        if (handlesThinkingBlocks(provider) || deepSeekServed) {
+        if (officialAnthropic || handlesThinkingBlocks(provider) || deepSeekServed) {
           let hasToolUse = false;
           let hasKeptThinking = false;
 
-          // Claude native: preserve valid signatures, drop invalid blocks.
-          // anthropic-compatible: replace with default (safe fallback for lenient upstreams).
+          // First-party history is passed back unchanged below. Other
+          // Claude-compatible gateways retain their existing signature fallback.
           // DeepSeek (official + opencode-go models): keep existing thinking as-is;
           // add an unsigned placeholder only if missing.
           // Every branch: a block with no visible thinking text goes — the upstream
@@ -638,6 +640,14 @@ export function prepareClaudeRequest(body, provider = null, apiKey = null, conne
           for (const block of msg.content) {
             const isThinking = block.type === CLAUDE_BLOCK.THINKING || block.type === CLAUDE_BLOCK.REDACTED_THINKING;
             if (isThinking) {
+              // Signed history is opaque to the router. In particular, redacted
+              // thinking carries data rather than thinking/signature fields.
+              // Replacing a signature with a placeholder breaks the next turn.
+              if (officialAnthropic) {
+                hasKeptThinking = true;
+                kept.push(block);
+                continue;
+              }
               if (!String(block.thinking ?? "").trim()) continue;
               if (isClaudeNative) {
                 if (isValidClaudeSignature(block.signature)) {
@@ -660,7 +670,7 @@ export function prepareClaudeRequest(body, provider = null, apiKey = null, conne
           msg.content = kept;
 
           // Add thinking block if thinking enabled + has tool_use but no thinking
-          if (thinkingEnabled && !hasKeptThinking && hasToolUse) {
+          if (!officialAnthropic && thinkingEnabled && !hasKeptThinking && hasToolUse) {
             msg.content.unshift(buildThinkingPlaceholder(provider, deepSeekServed));
           }
         }

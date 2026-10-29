@@ -117,3 +117,16 @@ export const GOOGLE_OAUTH_CLIENT = {
   clientId: "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com",
   clientSecret: "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"
 };
+
+// Match the destination hostname exactly; gateway names and paths may contain
+// api.anthropic.com without actually being the first-party endpoint.
+export function isOfficialAnthropicEndpoint(provider, baseUrl = null) {
+  if (provider !== "claude" && provider !== "anthropic" && !provider?.startsWith("anthropic-compatible-")) return false;
+  if (!baseUrl) return true;
+  try {
+    const url = new URL(baseUrl);
+    return url.protocol === "https:" && url.hostname === "api.anthropic.com";
+  } catch {
+    return false;
+  }
+}

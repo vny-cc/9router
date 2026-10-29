@@ -56,6 +56,8 @@ const COOLDOWN = {
  *   - cooldownMs: fixed cooldown duration
  *   - backoff: true = use exponential backoff (rate limit)
  */
+export const CREDIT_BALANCE_ERROR_TEXTS = ["insufficient credit", "credit balance is too low"];
+
 export const ERROR_RULES = [
   // --- Text-based rules (checked first, order = priority) ---
   { provider: "codex", text: "model is not supported when using codex with a chatgpt account", cooldownMs: MAX_RATE_LIMIT_COOLDOWN_MS },
@@ -68,8 +70,7 @@ export const ERROR_RULES = [
   { text: "rate limit",               backoff: true },
   { text: "too many requests",        backoff: true },
   { text: "quota exceeded",           backoff: true },
-  { text: "insufficient credit",      backoff: true },
-  { text: "credit balance is too low", backoff: true },
+  ...CREDIT_BALANCE_ERROR_TEXTS.map(text => ({ text, backoff: true })),
   { text: "capacity",                 backoff: true },
   { text: "overloaded",               backoff: true },
 

@@ -1,3 +1,4 @@
+import { anthropicBillingResponse } from "open-sse/utils/anthropicBillingError.js";
 import "open-sse/index.js";
 
 import {
@@ -284,6 +285,8 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     if (!credentials || credentials.allRateLimited) {
       if (credentials?.allRateLimited) {
         const errorMsg = lastError || credentials.lastError || "Unavailable";
+        const billing = anthropicBillingResponse(provider, lastStatus || credentials.lastErrorCode, errorMsg, lastHeaders);
+        if (billing) return billing;
         const restricted = codebuddyRestrictionResponse(provider, lastStatus || credentials.lastErrorCode, errorMsg, lastHeaders);
         if (restricted) return restricted;
         const status = HTTP_STATUS.SERVICE_UNAVAILABLE;
@@ -295,6 +298,8 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         return errorResponse(HTTP_STATUS.NOT_FOUND, `No active credentials for provider: ${provider}`);
       }
       log.warn("CHAT", "No more accounts available", { provider });
+      const billing = anthropicBillingResponse(provider, lastStatus, lastError, lastHeaders);
+      if (billing) return billing;
       const restricted = codebuddyRestrictionResponse(provider, lastStatus, lastError, lastHeaders);
       if (restricted) return restricted;
       return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable", lastHeaders);
