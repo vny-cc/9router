@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { prepareClaudeRequest, normalizeClaudePassthrough } from "../../open-sse/translator/formats/claude.js";
-import { isOfficialAnthropicEndpoint, CLAUDE_CLI_USER_AGENT } from "../../open-sse/providers/shared.js";
+import { isOfficialAnthropicEndpoint, ANTHROPIC_API_USER_AGENT } from "../../open-sse/providers/shared.js";
 const { fetchMock } = vi.hoisted(() => ({ fetchMock: vi.fn() }));
 vi.mock("../../open-sse/utils/proxyFetch.js", () => ({ proxyAwareFetch: fetchMock }));
 import { translateRequest } from "../../open-sse/translator/index.js";
@@ -18,6 +18,26 @@ const history = () => ({ model: "claude-opus-5-5", max_tokens: 1024, thinking: {
 ] });
 afterEach(() => vi.resetAllMocks());
 describe("first-party Anthropic continuation", () => {
+  it.each(["anthropic", provider])("does not invent a Claude Code/SDK identity for %s API keys", id => {
+    const headers = new DefaultExecutor(id).buildHeaders(credentials, false, "https://api.anthropic.com/v1/messages", "claude-opus-5-5", history());
+    expect(headers["User-Agent"]).toBe(ANTHROPIC_API_USER_AGENT);
+    const flags = headers["Anthropic-Beta"].split(",");
+    expect(flags).not.toContain("claude-code-20250219");
+    expect(flags).not.toContain("oauth-2025-04-20");
+    expect(flags).toContain("context-management-2025-06-27");
+  });
+  it("preserves an actual caller's declared CLI identity and flags", () => {
+    const rawHeaders = { "user-agent": "claude-cli/test (external, cli)", "anthropic-beta": "claude-code-20250219" };
+    const headers = new DefaultExecutor(provider).buildHeaders({ ...credentials, rawHeaders }, false, "https://api.anthropic.com/v1/messages", "claude-opus-5-5", history());
+    expect(headers["User-Agent"]).toBe(rawHeaders["user-agent"]);
+    expect(headers["Anthropic-Beta"].split(",")).toContain("claude-code-20250219");
+  });
+  it("preserves an API SDK caller's identity", () => {
+    const rawHeaders = new Headers({ "user-agent": "my-coding-app/1.0" });
+    const headers = new DefaultExecutor(provider).buildHeaders({ ...credentials, rawHeaders }, false, "https://api.anthropic.com/v1/messages", "claude-opus-5-5", history());
+    expect(headers["User-Agent"]).toBe("my-coding-app/1.0");
+  });
+
   it("sends the initial turn and multiple tool continuations without replacing signed history", async () => {
     fetchMock.mockImplementation(async () => new Response("{}", { status: 200 }));
     const executor = new DefaultExecutor(provider);
@@ -30,7 +50,7 @@ describe("first-party Anthropic continuation", () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
     for (const [url, options] of fetchMock.mock.calls) {
       expect(url).toBe("https://api.anthropic.com/v1/messages");
-      expect(options.headers["User-Agent"]).toBe(CLAUDE_CLI_USER_AGENT);
+      expect(options.headers["User-Agent"]).toBe(ANTHROPIC_API_USER_AGENT);
     }
     for (const [, options] of fetchMock.mock.calls.slice(1)) {
       const sent = JSON.parse(options.body).messages.find(m => m.role === "assistant");

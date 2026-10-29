@@ -1,7 +1,7 @@
 import { BaseExecutor } from "./base.js";
 import { randomUUID } from "node:crypto";
 import { PROVIDERS, PROVIDER_OAUTH } from "../config/providers.js";
-import { ANTHROPIC_API_VERSION, OPENAI_COMPAT_BASE, ANTHROPIC_COMPAT_BASE, CLAUDE_CLI_USER_AGENT, isOfficialAnthropicEndpoint, selectAnthropicBeta, mergeAnthropicBeta } from "../providers/shared.js";
+import { ANTHROPIC_API_VERSION, OPENAI_COMPAT_BASE, ANTHROPIC_COMPAT_BASE, ANTHROPIC_API_USER_AGENT, isOfficialAnthropicEndpoint, selectAnthropicBeta, mergeAnthropicBeta } from "../providers/shared.js";
 import { resolveOpenAICompatibleApiType } from "../services/provider.js";
 import { OAUTH_ENDPOINTS, buildKimiHeaders, NOUS_ATTRIBUTION } from "../config/appConstants.js";
 import { buildClineHeaders } from "../shared/clineAuth.js";
@@ -215,11 +215,18 @@ export class DefaultExecutor extends BaseExecutor {
     // a node fronting Kimi or GLM answers on its own ids and never matches, so
     // gateways that would choke on unknown beta flags are left untouched.
     const isClaudeModel = typeof model === "string" && /^claude-/.test(model);
-    const clientBeta = credentials?.rawHeaders?.["anthropic-beta"];
+    const clientHeaders = new Headers(credentials?.rawHeaders || {});
+    const clientBeta = clientHeaders.get("anthropic-beta");
+    const destination = url || credentials?.runtimeTransport?.baseUrl || credentials?.providerSpecificData?.baseUrl;
+    const officialApiKey = this.provider !== "claude" && !!credentials?.apiKey
+      && !credentials.apiKey.includes("sk-ant-oat")
+      && isOfficialAnthropicEndpoint(this.provider, destination);
     if (model && (this.provider === "claude"
       || (this.provider === "anthropic" && isClaudeModel)
       || (this.provider?.startsWith?.("anthropic-compatible-") && isClaudeModel))) {
-      headers["Anthropic-Beta"] = mergeAnthropicBeta(selectAnthropicBeta(model, body), clientBeta);
+      const defaults = selectAnthropicBeta(model, body).split(",").filter(flag =>
+        !officialApiKey || (flag !== "claude-code-20250219" && flag !== "oauth-2025-04-20"));
+      headers["Anthropic-Beta"] = mergeAnthropicBeta(defaults.join(","), clientBeta);
     }
 
     // Claude OAuth: align x-claude-code-session-id with metadata.user_id.session_id if missing
@@ -231,23 +238,12 @@ export class DefaultExecutor extends BaseExecutor {
       }
     }
 
-    // Claude Code identity for anthropic-compatible-* upstreams.
-    //
-    // First-party Anthropic gates its newest Claude models on the *client
-    // identity*, not the caller's balance: a request carrying the Claude Code
-    // system prompt — which every Claude Code request does — is answered with
-    // HTTP 400 "Your credit balance is too low to access the Anthropic API"
-    // unless it also presents the Claude CLI User-Agent. The message is
-    // misleading (the account is fine, the identity is missing) and it sends
-    // the combo down its fallback chain. The beta flags set above are not
-    // enough on their own, so the official endpoint needs the User-Agent that
-    // the `claude` provider sends.
-    //
-    // The built-in `anthropic` provider talks to the same first-party endpoint
-    // and needs the same identity — its registry headers carry only two beta
-    // flags and no User-Agent, so an API-key connection to it 400s the same way.
-    if (this.provider === "anthropic" && isClaudeModel && !headers["User-Agent"]) {
-      headers["User-Agent"] = CLAUDE_CLI_USER_AGENT;
+    // Preserve the caller's real identity; an API-key router must not label
+    // generic API usage as a Claude Code or Agent SDK session. Billing coverage
+    // is decided by Anthropic, not by the router.
+    if (officialApiKey) {
+      delete headers["user-agent"];
+      headers["User-Agent"] = clientHeaders.get("user-agent") || ANTHROPIC_API_USER_AGENT;
     }
 
     // Third-party gateways are left untouched: several of them reject the
@@ -256,9 +252,7 @@ export class DefaultExecutor extends BaseExecutor {
     if (this.provider?.startsWith?.("anthropic-compatible-")) {
       const baseUrl = credentials?.providerSpecificData?.baseUrl || "";
       const isOfficialAnthropic = isOfficialAnthropicEndpoint(this.provider, url || baseUrl);
-      if (isOfficialAnthropic) {
-        if (isClaudeModel) headers["User-Agent"] = CLAUDE_CLI_USER_AGENT;
-      } else {
+      if (!isOfficialAnthropic) {
         // Some third-party Anthropic-compatible gateways require Bearer auth in
         // addition to x-api-key. Send both (x-api-key already set above) so
         // gateways that read either header succeed.

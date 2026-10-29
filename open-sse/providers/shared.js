@@ -24,14 +24,9 @@ export function mapStainlessArch() {
 export const ANTHROPIC_API_VERSION = "2023-06-01";
 export const CLAUDE_CLI_VERSION = "2.1.280";
 
-// Claude CLI client identity. Anthropic gates the newest Claude models
-// (`claude-opus-5-5`, `claude-sonnet-5-5`, …) on the client identity, not on the
-// account balance: a request that carries the Claude Code system prompt without
-// this User-Agent is rejected with HTTP 400 "Your credit balance is too low to
-// access the Anthropic API", which reads as a billing problem but is really a
-// missing identity. The suffix must stay `sdk-cli` — `(external, cli)` and a
-// bare `claude-cli/<version>` are both rejected — and older versions answer
-// "Claude Code <version> does not support this model".
+// Identity for the Claude OAuth/CLI transport. API-key transports must not
+// force this identity: promotional API credits have product-specific coverage.
+export const ANTHROPIC_API_USER_AGENT = "9router-api";
 export const CLAUDE_CLI_USER_AGENT = `claude-cli/${CLAUDE_CLI_VERSION} (external, sdk-cli)`;
 
 // Shared Claude-compatible API headers (reused across claude-format providers)
