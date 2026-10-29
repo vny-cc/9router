@@ -1,4 +1,26 @@
 import { DefaultExecutor } from "./default.js";
+import { randomUUID } from "node:crypto";
+import { refreshCodebuddyToken, refreshCodebuddyIntlToken } from "../services/tokenRefresh.js";
+import {
+  CODEBUDDY_SYSTEM_PROMPT,
+  CODEBUDDY_EXTERNAL_IDENTITY,
+  CODEBUDDY_CHANNEL_HEADERS,
+  CODEBUDDY_CHANNEL_MARKERS,
+  CODEBUDDY_CHANNEL_MARKER_REGEX,
+} from "../config/codebuddyConstants.js";
+import { ROLE } from "../translator/schema/roles.js";
+import { OPENAI_BLOCK } from "../translator/schema/blocks.js";
+
+function sanitizeChannelMarkers(text) {
+  if (typeof text !== "string" || !text) return text;
+  let result = text;
+  for (const marker of CODEBUDDY_CHANNEL_MARKERS) {
+    if (result.includes(marker)) {
+      result = result.split(marker).join(CODEBUDDY_EXTERNAL_IDENTITY);
+    }
+  }
+  return result.replace(CODEBUDDY_CHANNEL_MARKER_REGEX, CODEBUDDY_EXTERNAL_IDENTITY);
+}
 
 /**
  * CodeBuddyExecutor — talks to https://copilot.tencent.com/v2/chat/completions
@@ -10,59 +32,87 @@ import { DefaultExecutor } from "./default.js";
  * SSE into a JSON response for non-streaming clients.
  */
 export class CodeBuddyExecutor extends DefaultExecutor {
-  constructor() {
-    super("codebuddy-cn");
+  constructor(provider = "codebuddy-cn") {
+    super(provider);
+  }
+
+  buildHeaders(credentials, stream = true, url, model, body = null) {
+    const headers = super.buildHeaders(credentials, true, url, model, body);
+    const reqId = randomUUID().replace(/-/g, "");
+    const convId = randomUUID();
+    const convReqId = randomUUID().replace(/-/g, "");
+    const domain =
+      credentials?.providerSpecificData?.domain ||
+      new URL(this.config.baseUrl).hostname;
+
+    delete headers["x-requested-with"];
+    delete headers["x-codebuddy-request"];
+
+    Object.assign(headers, {
+      ...CODEBUDDY_CHANNEL_HEADERS,
+      "X-Domain": domain,
+      "X-Stainless-Runtime-Version": process.version,
+      "X-Request-ID": reqId,
+      "X-Conversation-ID": convId,
+      "X-Conversation-Request-ID": convReqId,
+      "X-Conversation-Message-ID": reqId,
+    });
+
+    return headers;
   }
 
   transformRequest(model, body, stream, credentials) {
-    const transformed = super.transformRequest(model, body, stream, credentials);
-    transformed.stream = true;
+    const nextBody = super.transformRequest(model, body, stream, credentials);
+    nextBody.stream = true;
+    const effort = nextBody.reasoning_effort;
+    if (effort === "none" || effort === "off") {
+      delete nextBody.reasoning_effort;
+    } else if (effort) {
+      nextBody.reasoning_summary = "auto";
+    }
 
-    // Tencent's content filter flags CLI agent system prompts ("You are Claude
-    // Code, Anthropic's official CLI...") as prompt injection / sensitive content
-    // and rejects the whole request. Detect agent system prompts (length catch-all
-    // + identity-marker regex) and replace them with a neutral one, while leaving
-    // legitimate user system prompts untouched. content may be a string or typed
-    // blocks ([{type:"text",text}]) depending on the incoming client format, so
-    // flatten before matching and preserve the original shape on replacement.
-    const NEUTRAL_PROMPT = "You are a helpful AI assistant that helps with software engineering tasks.";
-    const AGENT_PATTERN = /you are claude code|claude.?code.+official.+cli|anthropic.+official.+cli|anxthxropic.+official.+cli|you are (?:cursor|windsurf|cline|aider|continue|copilot|cody)|you are an? (?:ai )?(?:coding |code )?agent|cc_entrypoint\s*=\s*(?:cli|vscode|jetbrains|gui)|claude.?code.+issues|give feedback.+claude.?code|you are .{0,30}(?:powerful )?ai agent|orchestration capabilities|OhMyOpenCode|<agent-identity>|<Role>|<Behavior_Instructions>/i;
-    const flatten = (content) =>
-      typeof content === "string"
-        ? content
-        : Array.isArray(content)
-          ? content.map((b) => (b && typeof b.text === "string" ? b.text : "")).join("\n")
-          : "";
-    if (Array.isArray(transformed.messages)) {
-      transformed.messages = transformed.messages.map((message) => {
-        if (!message || message.role !== "system") return message;
-        const text = flatten(message.content);
-        if (!text) return message;
-        if (text.length > 2000 || AGENT_PATTERN.test(text)) {
-          return typeof message.content === "string"
-            ? { ...message, content: NEUTRAL_PROMPT }
-            : { ...message, content: [{ type: "text", text: NEUTRAL_PROMPT }] };
+    const inputMessages = Array.isArray(nextBody.messages) ? nextBody.messages : [];
+    const systemParts = [CODEBUDDY_SYSTEM_PROMPT];
+    const otherMessages = [];
+
+    for (const message of inputMessages) {
+      if (!message || typeof message !== "object") continue;
+      if (message.role === ROLE.SYSTEM || message.role === ROLE.DEVELOPER) {
+        const rawText =
+          typeof message.content === "string"
+            ? message.content
+            : Array.isArray(message.content)
+              ? message.content
+                  .map((block) => (typeof block === "string" ? block : block && typeof block.text === "string" ? block.text : ""))
+                  .join("\n")
+              : "";
+        const cleaned = sanitizeChannelMarkers(rawText).trim();
+        if (cleaned && cleaned !== CODEBUDDY_SYSTEM_PROMPT) systemParts.push(cleaned);
+        continue;
+      }
+      if (message.role === ROLE.USER && typeof message.content === "string") {
+        otherMessages.push({ ...message, content: [{ type: OPENAI_BLOCK.TEXT, text: message.content }] });
+        continue;
+      }
+      if (message.role === ROLE.ASSISTANT) {
+        const nextMessage = { ...message };
+        if (typeof nextMessage.content === "string") {
+          nextMessage.content = sanitizeChannelMarkers(nextMessage.content);
+        } else if (Array.isArray(nextMessage.content)) {
+          nextMessage.content = nextMessage.content.map((block) =>
+            block && typeof block === "object" && typeof block.text === "string"
+              ? { ...block, text: sanitizeChannelMarkers(block.text) }
+              : block
+          );
         }
-        return message;
-      });
+        otherMessages.push(nextMessage);
+        continue;
+      }
+      otherMessages.push({ ...message });
     }
 
-    // CodeBuddy only surfaces model reasoning when the request carries the CLI's
-    // OpenAI-style params: reasoning_effort + reasoning_summary:"auto". 9router's
-    // thinking pipeline sets reasoning_effort only when the client asks, and never
-    // sets reasoning_summary — so reasoning never shows. Mirror the CLI here.
-    const eff = transformed.reasoning_effort;
-    if (eff === "none" || eff === "off") {
-      delete transformed.reasoning_effort; // gateway has no "none" — just omit
-    } else if (eff) {
-      // Client explicitly asked for reasoning — mirror the CLI's reasoning_summary
-      // so CodeBuddy surfaces the model's reasoning.
-      transformed.reasoning_summary = "auto";
-    }
-    // No reasoning requested: leave both unset. Forcing reasoning_effort:"medium"
-    // + reasoning_summary on plain requests makes CodeBuddy trip its content
-    // filter and return an error (#2071).
-    return transformed;
+    nextBody.messages = [{ role: ROLE.SYSTEM, content: systemParts.join("\n\n") }, ...otherMessages];
+    return nextBody;
   }
   parseError(response, bodyText) {
     if (bodyText) {
@@ -90,6 +140,13 @@ export class CodeBuddyExecutor extends DefaultExecutor {
       } catch {}
     }
     return super.parseError(response, bodyText);
+  }
+
+  async refreshCredentials(credentials, log) {
+    if (!credentials?.refreshToken) return null;
+    return this.provider === "codebuddy-intl"
+      ? refreshCodebuddyIntlToken(credentials.refreshToken, log)
+      : refreshCodebuddyToken(credentials.refreshToken, log);
   }
 }
 

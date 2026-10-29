@@ -4,6 +4,7 @@ import { testProxyUrl } from "@/lib/network/proxyTest";
 import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider, AI_PROVIDERS } from "@/shared/constants/providers";
 import { getDefaultModel } from "open-sse/config/providerModels.js";
 import { probeBedrockCredentials } from "open-sse/executors/bedrock.js";
+import { probeCodebuddyCredentials } from "open-sse/services/codebuddyProbe.js";
 import { resolveOllamaLocalHost, PROVIDERS } from "open-sse/config/providers.js";
 import { CODEX_CLI_VERSION } from "open-sse/config/appConstants.js";
 import { GROK_CLI_PAGER_USER_AGENT, GROK_CLI_VERSION } from "open-sse/config/grokCli.js";
@@ -588,6 +589,11 @@ async function testApiKeyConnection(connection, effectiveProxy = null) {
 
   try {
     switch (connection.provider) {
+      case "codebuddy-cn":
+      case "codebuddy-intl":
+        return await probeCodebuddyCredentials(connection, (url, options) =>
+          fetchWithConnectionProxy(url, options, effectiveProxy)
+        );
       case "commandcode": {
         const res = await fetchWithConnectionProxy(
           "https://api.commandcode.ai/alpha/whoami?limits=1",
