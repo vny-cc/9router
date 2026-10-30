@@ -232,10 +232,14 @@ export class DefaultExecutor extends BaseExecutor {
       }
     }
 
-    // Strip first-party Claude Code identity headers for non-Anthropic anthropic-compatible upstreams
+    // Strip first-party Claude Code identity headers for non-Anthropic anthropic-compatible upstreams.
+    // Also stripped when providerSpecificData.stripClaudeCodeHeaders=true (e.g. API-key node pointing
+    // at api.anthropic.com but needs to appear as a plain SDK call, not a Claude Code client,
+    // so promotional/API credits are applied instead of being rejected).
     if (this.provider?.startsWith?.("anthropic-compatible-")) {
       const baseUrl = credentials?.providerSpecificData?.baseUrl || "";
-      const isOfficialAnthropic = baseUrl === "" || baseUrl.includes("api.anthropic.com");
+      const forceStrip = credentials?.providerSpecificData?.stripClaudeCodeHeaders === true;
+      const isOfficialAnthropic = !forceStrip && (baseUrl === "" || baseUrl.includes("api.anthropic.com"));
       if (!isOfficialAnthropic) {
         // Some third-party Anthropic-compatible gateways require Bearer auth in
         // addition to x-api-key. Send both (x-api-key already set above) so
@@ -260,6 +264,34 @@ export class DefaultExecutor extends BaseExecutor {
             } else {
               delete headers[betaKey];
             }
+          }
+        }
+        // When forceStrip: also remove remaining Claude Code identity signals so
+        // Anthropic sees this as a plain SDK/API call, not a Claude Code client.
+        if (forceStrip) {
+          delete headers["x-claude-code-session-id"];
+          delete headers["X-Claude-Code-Session-Id"];
+          delete headers["x-stainless-helper-method"];
+          delete headers["X-Stainless-Helper-Method"];
+          delete headers["x-stainless-retry-count"];
+          delete headers["X-Stainless-Retry-Count"];
+          delete headers["x-stainless-runtime-version"];
+          delete headers["X-Stainless-Runtime-Version"];
+          delete headers["x-stainless-package-version"];
+          delete headers["X-Stainless-Package-Version"];
+          delete headers["x-stainless-runtime"];
+          delete headers["X-Stainless-Runtime"];
+          delete headers["x-stainless-lang"];
+          delete headers["X-Stainless-Lang"];
+          delete headers["x-stainless-arch"];
+          delete headers["X-Stainless-Arch"];
+          delete headers["x-stainless-os"];
+          delete headers["X-Stainless-Os"];
+          delete headers["x-stainless-timeout"];
+          delete headers["X-Stainless-Timeout"];
+          // Replace claude-cli User-Agent with plain SDK fingerprint
+          if (headers["User-Agent"] && headers["User-Agent"].includes("claude-cli")) {
+            headers["User-Agent"] = "anthropic-sdk-js/0.80.0";
           }
         }
       }
