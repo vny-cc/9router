@@ -38,6 +38,9 @@ export function claudeToOpenAIResponse(chunk, state) {
         const promptTokens = inputTokens + cacheReadTokens + cacheCreationTokens;
         state.usage = {
           prompt_tokens: promptTokens,
+          // The prompt already includes cache. Mark it canonical so storage
+          // does not fold the native Claude cache fields into it a second time.
+          cached_tokens: cacheReadTokens,
           completion_tokens: 0,
           total_tokens: promptTokens,
           input_tokens: inputTokens,
@@ -131,6 +134,7 @@ export function claudeToOpenAIResponse(chunk, state) {
 
         state.usage = {
           prompt_tokens: promptTokens,
+          cached_tokens: cacheReadTokens,
           completion_tokens: outputTokens,
           total_tokens: promptTokens + outputTokens,
           input_tokens: inputTokens,
